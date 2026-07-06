@@ -1,11 +1,16 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback } from 'react';
-import { mockStartups, evaluateStartup, industries, type Startup } from '@/lib/mock-data';
+import {
+  mockStartups, evaluateStartup, buildForecast, industries, stages, revenueModels,
+  type Startup, type Pillar, type StartupInput,
+} from '@/lib/mock-data';
+import { extractFromFile, type ExtractedFields } from '@/lib/extract';
 import {
   LayoutDashboard, Rows3, BookOpen, Search, ChevronRight, ChevronDown,
   Download, Play, ArrowLeft, ArrowUpRight, CircleCheck, TriangleAlert, CircleX,
-  Plus, X, Upload, FileDown,
+  Plus, X, Upload, FileDown, TrendingUp, Sparkles, Gauge, ArrowRight, Check,
+  FileText, Loader2,
 } from 'lucide-react';
 
 type View = 'overview' | 'apps' | 'methodology';
@@ -103,6 +108,77 @@ function exportCsv(data: Startup[]) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/* ---------- confidence meter ---------- */
+
+function ConfidenceMeter({ value, compact = false }: { value: number; compact?: boolean }) {
+  const tone = value >= 80 ? { bar: 'bg-good', text: 'text-good' } : value >= 60 ? { bar: 'bg-warn', text: 'text-warn' } : { bar: 'bg-bad', text: 'text-bad' };
+  if (compact) {
+    return (
+      <span className="inline-flex items-center gap-1.5" title={`Data confidence ${value}%`}>
+        <Gauge className={`w-3.5 h-3.5 ${tone.text}`} />
+        <span className={`font-mono text-[11px] font-semibold ${tone.text}`}>{value}%</span>
+      </span>
+    );
+  }
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-xs text-ink-2 inline-flex items-center gap-1.5"><Gauge className="w-3.5 h-3.5 text-ink-3" /> Data confidence</span>
+        <span className={`font-mono text-[13px] font-semibold ${tone.text}`}>{value}%</span>
+      </div>
+      <div className="h-2 bg-tint rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${value}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------- market forecast chart (regression) ---------- */
+
+function ForecastChart({ forecast }: { forecast: Startup['market_forecast'] }) {
+  const W = 520, H = 190, padL = 34, padR = 12, padT = 12, padB = 24;
+  const hist = forecast.history;
+  const proj = forecast.projection;
+  const allYears = [...hist.map((d) => d.year), ...proj.map((d) => d.year)];
+  const minYear = Math.min(...allYears), maxYear = Math.max(...allYears);
+  const allVals = [...hist.map((d) => d.tam), ...proj.map((d) => d.hi)];
+  const maxVal = Math.max(...allVals) * 1.05, minVal = 0;
+  const x = (yr: number) => padL + ((yr - minYear) / (maxYear - minYear)) * (W - padL - padR);
+  const y = (v: number) => padT + (1 - (v - minVal) / (maxVal - minVal)) * (H - padT - padB);
+
+  const histPath = hist.map((d, i) => `${i === 0 ? 'M' : 'L'}${x(d.year).toFixed(1)},${y(d.tam).toFixed(1)}`).join(' ');
+  const projLine = proj.map((d, i) => `${i === 0 ? 'M' : 'L'}${x(d.year).toFixed(1)},${y(d.tam).toFixed(1)}`).join(' ');
+  const bandTop = proj.map((d, i) => `${i === 0 ? 'M' : 'L'}${x(d.year).toFixed(1)},${y(d.hi).toFixed(1)}`).join(' ');
+  const bandBottom = proj.slice().reverse().map((d) => `L${x(d.year).toFixed(1)},${y(d.lo).toFixed(1)}`).join(' ');
+  const band = `${bandTop} ${bandBottom} Z`;
+  const gridVals = [0, maxVal / 2, maxVal];
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Market size forecast">
+      {gridVals.map((v, i) => (
+        <g key={i}>
+          <line x1={padL} y1={y(v)} x2={W - padR} y2={y(v)} stroke="var(--line)" strokeWidth="1" />
+          <text x={padL - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--ink-3)" fontFamily="var(--font-mono)">${v.toFixed(0)}B</text>
+        </g>
+      ))}
+      {allYears.filter((_, i) => i % 2 === 0 || i === allYears.length - 1).map((yr) => (
+        <text key={yr} x={x(yr)} y={H - 8} textAnchor="middle" fontSize="9" fill="var(--ink-3)" fontFamily="var(--font-mono)">{yr}</text>
+      ))}
+      <path d={band} fill="var(--accent)" opacity="0.10" />
+      <path d={histPath} fill="none" stroke="var(--ink-2)" strokeWidth="2" />
+      <path d={projLine} fill="none" stroke="var(--accent)" strokeWidth="2" strokeDasharray="5 4" />
+      {hist.map((d) => <circle key={d.year} cx={x(d.year)} cy={y(d.tam)} r="2.5" fill="var(--ink-2)" />)}
+      <circle cx={x(proj[proj.length - 1].year)} cy={y(proj[proj.length - 1].tam)} r="3" fill="var(--accent)" />
+    </svg>
+  );
+}
+
+/* ---------- pillar breakdown ---------- */
+
+const PILLAR_TONE: Record<Pillar['key'], string> = {
+  team: 'bg-accent', traction: 'bg-good', market: 'bg-warn', macro: 'bg-ink-3',
+};
 
 /* ========== OVERVIEW ========== */
 
@@ -402,14 +478,12 @@ function AppsView({
 /* ========== DETAIL PANE — THE MEMO ========== */
 
 function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void }) {
-  const [expandedFactor, setExpandedFactor] = useState<number | null>(null);
-  const baseScore = 30;
-  const totalPositive = startup.score_breakdown.filter((f) => f.impact > 0).reduce((s, f) => s + f.impact, 0);
-  const totalNegative = startup.score_breakdown.filter((f) => f.impact < 0).reduce((s, f) => s + Math.abs(f.impact), 0);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const mr = startup.market_research;
   const ma = startup.macro_analysis;
+  const fc = startup.market_forecast;
 
-  useEffect(() => setExpandedFactor(null), [startup.id]);
+  useEffect(() => setExpanded(null), [startup.id]);
 
   return (
     <>
@@ -427,13 +501,15 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
             <div className="flex items-center gap-2.5 flex-wrap">
               <h1 className="text-lg font-semibold tracking-tight truncate">{startup.name}</h1>
               <VerdictChip verdict={startup.verdict} size="md" />
+              <ConfidenceMeter value={startup.confidence} compact />
             </div>
             <p className="text-[13px] text-ink-2 mt-0.5 truncate">{startup.description}</p>
             <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1.5 text-[11px] text-ink-3">
               <span>{startup.industry} · {startup.is_b2b ? 'B2B' : 'B2C'}</span>
+              <span>{startup.stage}</span>
               <span>Team {startup.team_size}</span>
-              <span>{fmtMoney0(startup.funding_total_usd)} raised · {startup.funding_rounds} {startup.funding_rounds === 1 ? 'round' : 'rounds'}</span>
-              <span>{startup.founder_name}</span>
+              {startup.ask_amount_usd > 0 && <span>Ask {fmtMoney0(startup.ask_amount_usd)}</span>}
+              <span>{startup.country}</span>
             </div>
           </div>
         </div>
@@ -443,63 +519,117 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
       <div className="flex-1 overflow-y-auto bg-canvas">
         <div className="p-5 lg:p-7 max-w-3xl space-y-4">
 
-          {/* Why this score */}
+          {/* Why this score — four pillars */}
           <Card
             title="Why this score"
             aside={
               <span className="font-mono text-[11px] text-ink-3">
-                {baseScore} base <span className="text-good">+{totalPositive}</span>
-                {totalNegative > 0 && <span className="text-bad"> −{totalNegative}</span>}
-                <span className="font-semibold text-ink"> = {startup.score}</span>
+                4 pillars <span className="font-semibold text-ink">= {startup.score}/100</span>
               </span>
             }
           >
-            <div className="divide-y divide-line -mx-5">
-              {startup.score_breakdown.map((factor, i) => {
-                const isExpanded = expandedFactor === i;
-                const impactColor = factor.impact > 0 ? 'text-good' : factor.impact < 0 ? 'text-bad' : 'text-ink-3';
-                const barColor = factor.direction === 'positive' ? 'bg-good' : factor.direction === 'negative' ? 'bg-bad' : 'bg-ink-3';
-                const barWidth = factor.max_impact > 0 ? `${(Math.abs(factor.impact) / factor.max_impact) * 100}%` : '0%';
-                return (
-                  <div key={i}>
-                    <button
-                      onClick={() => setExpandedFactor(isExpanded ? null : i)}
-                      className={`w-full flex items-center gap-3 px-5 py-3 text-left transition-colors ${isExpanded ? 'bg-tint/40' : 'hover:bg-tint/40'}`}
-                    >
-                      <span className="text-[13px] font-medium text-ink w-40 lg:w-48 shrink-0 leading-snug">{factor.criterion}</span>
-                      <span className="flex-1 h-1.5 bg-tint rounded-full overflow-hidden">
-                        <span className={`block h-full rounded-full ${barColor}`} style={{ width: barWidth, minWidth: factor.impact !== 0 ? '5px' : '0' }} />
-                      </span>
-                      <span className="hidden sm:block text-[11px] text-ink-3 w-36 text-right truncate">{factor.value}</span>
-                      <span className={`font-mono text-xs font-semibold w-9 text-right ${impactColor}`}>
-                        {factor.impact > 0 ? `+${factor.impact}` : factor.impact}
-                      </span>
-                      <ChevronDown className={`w-3.5 h-3.5 text-ink-3 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                    </button>
-                    {isExpanded && (
-                      <div className="px-5 pb-4 pt-1 bg-tint/40">
-                        <p className="text-[13px] leading-relaxed text-ink-2">{factor.explanation}</p>
-                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          {factor.threshold && (
-                            <div className="bg-pane border border-line rounded-lg p-3">
-                              <div className="microlabel mb-1">Scoring rule</div>
-                              <p className="text-xs leading-snug text-ink">{factor.threshold}</p>
-                            </div>
-                          )}
-                          {factor.benchmark && (
-                            <div className="bg-pane border border-line rounded-lg p-3">
-                              <div className="microlabel mb-1">Industry benchmark</div>
-                              <p className="text-xs leading-snug text-ink-2">{factor.benchmark}</p>
+            {/* pillar summary bars */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-2">
+              {startup.pillars.map((p) => (
+                <div key={p.key} className="bg-canvas border border-line rounded-lg px-3 py-2.5">
+                  <div className="microlabel truncate">{p.label}</div>
+                  <div className="font-mono text-[15px] font-semibold mt-0.5">{p.score}<span className="text-ink-3 text-[11px]">/{p.max}</span></div>
+                  <div className="h-1.5 bg-tint rounded-full overflow-hidden mt-1.5">
+                    <div className={`h-full rounded-full ${PILLAR_TONE[p.key]}`} style={{ width: `${(p.score / p.max) * 100}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* factor rows grouped by pillar */}
+            <div className="-mx-5 mt-1">
+              {startup.pillars.map((p) => (
+                <div key={p.key}>
+                  <div className="px-5 pt-3 pb-1 flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full ${PILLAR_TONE[p.key]}`} />
+                    <span className="microlabel">{p.label}</span>
+                    <span className="font-mono text-[11px] text-ink-3">{p.score}/{p.max}</span>
+                  </div>
+                  <div className="divide-y divide-line border-t border-line">
+                    {p.factors.map((factor, i) => {
+                      const key = `${p.key}-${i}`;
+                      const isExpanded = expanded === key;
+                      const impactColor = factor.direction === 'positive' ? 'text-good' : factor.direction === 'negative' ? 'text-bad' : 'text-ink-3';
+                      const barColor = factor.direction === 'positive' ? 'bg-good' : factor.direction === 'negative' ? 'bg-bad' : 'bg-ink-3';
+                      const barWidth = factor.max_impact > 0 ? `${(factor.impact / factor.max_impact) * 100}%` : '0%';
+                      return (
+                        <div key={key}>
+                          <button
+                            onClick={() => setExpanded(isExpanded ? null : key)}
+                            className={`w-full flex items-center gap-3 px-5 py-2.5 text-left transition-colors ${isExpanded ? 'bg-tint/40' : 'hover:bg-tint/40'}`}
+                          >
+                            <span className="text-[13px] font-medium text-ink w-40 lg:w-48 shrink-0 leading-snug">{factor.criterion}</span>
+                            <span className="flex-1 h-1.5 bg-tint rounded-full overflow-hidden">
+                              <span className={`block h-full rounded-full ${barColor}`} style={{ width: barWidth, minWidth: factor.impact !== 0 ? '5px' : '0' }} />
+                            </span>
+                            <span className="hidden sm:block text-[11px] text-ink-3 w-36 text-right truncate">{factor.value}</span>
+                            <span className={`font-mono text-xs font-semibold w-12 text-right ${impactColor}`}>
+                              +{factor.impact}<span className="text-ink-3">/{factor.max_impact}</span>
+                            </span>
+                            <ChevronDown className={`w-3.5 h-3.5 text-ink-3 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                          </button>
+                          {isExpanded && (
+                            <div className="px-5 pb-4 pt-1 bg-tint/40">
+                              <p className="text-[13px] leading-relaxed text-ink-2">{factor.explanation}</p>
+                              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {factor.threshold && (
+                                  <div className="bg-pane border border-line rounded-lg p-3">
+                                    <div className="microlabel mb-1">Scoring rule</div>
+                                    <p className="text-xs leading-snug text-ink">{factor.threshold}</p>
+                                  </div>
+                                )}
+                                {factor.benchmark && (
+                                  <div className="bg-pane border border-line rounded-lg p-3">
+                                    <div className="microlabel mb-1">Benchmark</div>
+                                    <p className="text-xs leading-snug text-ink-2">{factor.benchmark}</p>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           )}
                         </div>
-                      </div>
-                    )}
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
-            <p className="text-[11px] text-ink-3 pt-3">Click a criterion for the rule and benchmark behind it.</p>
+            <div className="pt-4">
+              <ConfidenceMeter value={startup.confidence} />
+              <p className="text-[11px] text-ink-3 mt-2">Confidence reflects how much of the pitch-deck / financial data was supplied. Click any factor for the rule behind it.</p>
+            </div>
+          </Card>
+
+          {/* Market forecast — regression */}
+          <Card
+            title={`Market forecast — ${startup.industry}`}
+            aside={<span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-accent"><TrendingUp className="w-3.5 h-3.5" /> Regression model</span>}
+          >
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              {[
+                { label: 'Modeled CAGR', value: `${(fc.cagr * 100).toFixed(1)}%`, color: fc.cagr >= 0.2 ? 'text-good' : 'text-ink' },
+                { label: 'Fit quality (R²)', value: fc.r2.toFixed(2), color: 'text-ink' },
+                { label: `SOM in ${fc.horizon}y`, value: `$${fc.som_exit}M`, color: 'text-good' },
+              ].map((cell, i) => (
+                <div key={i} className="bg-canvas border border-line rounded-lg px-3 py-2.5">
+                  <div className="microlabel">{cell.label}</div>
+                  <div className={`font-mono text-lg font-semibold mt-0.5 ${cell.color}`}>{cell.value}</div>
+                </div>
+              ))}
+            </div>
+            <ForecastChart forecast={fc} />
+            <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-ink-3">
+              <span className="inline-flex items-center gap-1.5"><span className="w-3 h-0.5 bg-ink-2" /> Historical TAM</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-3 h-0.5 bg-accent" style={{ borderTop: '2px dashed var(--accent)' }} /> Projected (95% band)</span>
+            </div>
+            <p className="mt-3 text-[13px] leading-relaxed text-ink-2">
+              {fc.method} The obtainable market (SOM) is projected from ${fc.som_now}M today to ~${fc.som_exit}M in {fc.horizon} years at the modeled {(fc.cagr * 100).toFixed(1)}% CAGR — the revenue ceiling the fund underwrites against.
+            </p>
           </Card>
 
           {/* Signals */}
@@ -530,15 +660,15 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
           <Card title="Decision path" aside={<span className="microlabel">Audit log</span>}>
             <div className="bg-code rounded-lg px-4 py-4 font-mono text-xs leading-6 overflow-x-auto">
               {startup.decision_path.map((step, i) => {
-                const color = step.includes('INVEST')
+                const color = step.includes('PURSUE')
                   ? 'text-[#7fd39a] font-semibold'
                   : step.includes('PASS')
                   ? 'text-[#f09a83] font-semibold'
                   : step.includes('REVIEW')
                   ? 'text-[#e2bb6d] font-semibold'
-                  : step.includes('→ Yes')
+                  : step.includes('healthy') || step.includes('Strongest')
                   ? 'text-[#7fd39a]'
-                  : step.includes('→ No')
+                  : step.includes('slow') || step.includes('Weakest')
                   ? 'text-[#f09a83]'
                   : 'text-[#b9bdc7]';
                 return (
@@ -691,20 +821,23 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
           </Card>
 
           {/* Application data */}
-          <Card title="Application data">
+          <Card title="Application data" aside={<span className="microlabel">ITPV intake</span>}>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {[
                 { label: 'Industry', value: startup.industry },
+                { label: 'Development stage', value: startup.stage },
                 { label: 'Business model', value: startup.is_b2b ? 'B2B' : 'B2C' },
+                { label: 'Revenue model', value: startup.revenue_model },
                 { label: 'Team size', value: `${startup.team_size} people` },
+                { label: 'Unique tech / patents', value: startup.unique_tech ? 'Yes' : 'No' },
+                { label: 'Founding year', value: String(startup.founding_year) },
+                { label: 'Country', value: startup.country },
+                { label: 'Previous investment', value: startup.previous_investment ? 'Yes' : 'No' },
                 { label: 'Total funding', value: fmtMoney0(startup.funding_total_usd) },
-                { label: 'Funding rounds', value: String(startup.funding_rounds) },
-                {
-                  label: 'Time to first funding',
-                  value: startup.time_to_first_funding_months > 0 ? `${startup.time_to_first_funding_months} months` : 'N/A',
-                },
-                { label: 'Previous founder exit', value: startup.has_previous_exit ? 'Yes' : 'No' },
+                { label: 'Ask to ITPV', value: fmtMoney0(startup.ask_amount_usd) },
+                { label: 'Round size', value: fmtMoney0(startup.round_size_usd) },
                 { label: 'Revenue', value: fmtMoney0(startup.sales_amount_usd) },
+                { label: 'Previous founder exit', value: startup.has_previous_exit ? 'Yes' : 'No' },
                 { label: 'Founder', value: startup.founder_name },
               ].map((item, i) => (
                 <div key={i} className="bg-canvas border border-line rounded-lg px-3 py-2.5">
@@ -713,6 +846,12 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
                 </div>
               ))}
             </div>
+            {startup.founder_background && startup.founder_background !== 'Not provided' && (
+              <div className="mt-3">
+                <div className="microlabel mb-1.5">Founder background</div>
+                <p className="text-[13px] leading-relaxed text-ink-2">{startup.founder_background}</p>
+              </div>
+            )}
           </Card>
         </div>
       </div>
@@ -725,26 +864,24 @@ function DetailPane({ startup, onBack }: { startup: Startup; onBack: () => void 
 function MethodologyView() {
   const steps = [
     {
-      num: '01', title: 'Input',
-      desc: 'Startups enter via CSV upload (batch), manual form entry, or URL scraping. Works even for early-stage startups with no website — just 6–7 basic data points.',
+      num: '01', title: 'Intake',
+      desc: 'Applications arrive through the IT-Park Ventures form (Project Information, Contacts & Team, Materials) — entered manually, imported as a CSV batch, or auto-filled by reading an uploaded pitch deck / financial model in the browser.',
     },
     {
-      num: '02', title: 'Evaluation',
-      desc: 'A trained decision-tree ML model evaluates each startup on funding history, team composition, market type (B2B vs B2C), time-to-funding velocity, and founder track record.',
+      num: '02', title: 'Four-pillar scoring',
+      desc: 'Each startup is scored across Team & Founder, Traction & Financials, Market & Growth, and Macro & Deal Fit. Market growth is not self-reported — it comes from a regression on the sector’s historical market size.',
     },
     {
-      num: '03', title: 'Ranked output',
-      desc: 'Every startup receives a confidence score (0–100), a list of strengths, a list of red flags with written explanations, and the exact decision-tree path showing the logic.',
+      num: '03', title: 'Transparent output',
+      desc: 'Every verdict shows the points earned per pillar and factor, a market-forecast chart, strengths, red flags, the audit-log decision path, and a data-confidence rating that reflects how complete the submission was.',
     },
   ];
 
-  const criteria = [
-    { name: 'Previous founder exits', desc: 'Has the founder built and sold a company before?' },
-    { name: 'Total funding raised', desc: 'Cumulative capital raised to date (USD)' },
-    { name: 'Number of funding rounds', desc: 'How many distinct funding rounds completed' },
-    { name: 'Time to first funding', desc: 'Months from founding to first investment' },
-    { name: 'Business model', desc: 'B2B vs B2C — B2B has higher survival rates' },
-    { name: 'Team size', desc: 'Total full-time team members' },
+  const pillars = [
+    { name: 'Team & Founder', weight: 25, tone: 'bg-accent', factors: 'Execution track record (prior exit / shipped projects), founder background depth, technical moat (unique tech/patents), team size.' },
+    { name: 'Traction & Financials', weight: 30, tone: 'bg-good', factors: 'Prior investment, revenue validation, revenue growth, runway, and development stage. Growth & runway come from the financial model when supplied.' },
+    { name: 'Market & Growth', weight: 30, tone: 'bg-warn', factors: 'Serviceable market (SAM), regression-projected CAGR, obtainable market (SOM) at exit, and competitive density.' },
+    { name: 'Macro & Deal Fit', weight: 15, tone: 'bg-ink-3', factors: 'Regulatory environment, geography & currency (home-market advantage), FDI trend, and ask vs. the $10K–$1M fund mandate.' },
   ];
 
   return (
@@ -752,7 +889,7 @@ function MethodologyView() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Methodology</h1>
         <p className="text-[13px] text-ink-3 mt-0.5">
-          A transparent, three-step process from raw application to recommendation.
+          A transparent path from an IT-Park Ventures application to a market-aware recommendation.
         </p>
       </div>
 
@@ -770,35 +907,67 @@ function MethodologyView() {
         ))}
       </div>
 
+      <Card title="The four pillars — 100 points">
+        <div className="space-y-4">
+          {pillars.map((p) => (
+            <div key={p.name}>
+              <div className="flex items-center gap-2.5 mb-1.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${p.tone}`} />
+                <span className="text-[13px] font-semibold text-ink">{p.name}</span>
+                <span className="font-mono text-[11px] text-ink-3">{p.weight} pts</span>
+                <div className="flex-1 h-1.5 bg-tint rounded-full overflow-hidden ml-1">
+                  <div className={`h-full rounded-full ${p.tone}`} style={{ width: `${p.weight}%` }} />
+                </div>
+              </div>
+              <p className="text-[13px] leading-relaxed text-ink-2 pl-5">{p.factors}</p>
+            </div>
+          ))}
+        </div>
+        <div className="mt-5 pt-4 border-t border-line grid grid-cols-3 gap-3 text-center">
+          {[
+            { v: '≥ 70', l: 'Pursue', c: 'text-good' },
+            { v: '45–69', l: 'Review', c: 'text-warn' },
+            { v: '< 45', l: 'Pass', c: 'text-bad' },
+          ].map((t) => (
+            <div key={t.l} className="bg-canvas border border-line rounded-lg py-2.5">
+              <div className={`font-mono text-lg font-semibold ${t.c}`}>{t.v}</div>
+              <div className="microlabel mt-0.5">{t.l}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
       <div className="bg-code rounded-xl px-6 py-6">
-        <div className="microlabel !text-[#8b8f99]">Model transparency</div>
+        <div className="microlabel !text-[#8b8f99]">The market-growth regression</div>
+        <p className="text-[13px] leading-relaxed text-[#c7cbd4] mt-3">
+          For each sector we hold six years of market-size (TAM) history. A log-linear ordinary-least-squares regression
+          fits <span className="font-mono text-white">ln(TAM) = a + b·year</span>, so the modeled growth rate is
+          <span className="font-mono text-white"> CAGR = e^b − 1</span>. We report the fit quality (R²), project the market
+          five years forward with a 95% confidence band, and grow the startup&apos;s obtainable market (SOM) at the same rate.
+          It is a fully auditable statistical projection — not a black-box model.
+        </p>
         <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-6">
           {[
-            { value: '40,000+', label: 'Real startup outcomes (training data)' },
-            { value: 'Decision tree', label: 'Fully interpretable ML model' },
-            { value: '6', label: 'Core evaluation criteria' },
-            { value: '85%+', label: 'Accuracy on test data' },
+            { value: '4 pillars', label: 'Weighted 25 / 30 / 30 / 15' },
+            { value: 'OLS', label: 'Log-linear market regression' },
+            { value: '5-year', label: 'Forward market projection' },
+            { value: 'Confidence', label: 'Scaled by data completeness' },
           ].map((stat, i) => (
             <div key={i}>
-              <div className="font-mono text-xl font-semibold text-white">{stat.value}</div>
+              <div className="font-mono text-lg font-semibold text-white">{stat.value}</div>
               <div className="text-[11px] text-[#9ba0ab] mt-1 leading-relaxed">{stat.label}</div>
             </div>
           ))}
         </div>
       </div>
 
-      <Card title="The six criteria">
-        <div className="divide-y divide-line -mx-5">
-          {criteria.map((c, i) => (
-            <div key={i} className="flex gap-4 px-5 py-3">
-              <span className="font-mono text-xs text-ink-3 pt-0.5">{String(i + 1).padStart(2, '0')}</span>
-              <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-x-4">
-                <span className="text-[13px] font-medium text-ink">{c.name}</span>
-                <span className="text-[13px] text-ink-2">{c.desc}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+      <Card title="Reading a pitch deck (free, in-browser)">
+        <p className="text-[13px] leading-relaxed text-ink-2">
+          Uploaded pitch decks (PDF) and financial models (XLSX / CSV / PDF) are parsed entirely in the browser with
+          pdf.js and SheetJS — no server, no API key, no data leaving the page. Simple extraction pulls out revenue,
+          growth, runway, market size, team and ask, then pre-fills the form for the analyst to confirm before scoring.
+          The more the deck reveals, the higher the data-confidence rating on the verdict.
+        </p>
       </Card>
     </div>
   );
@@ -814,16 +983,25 @@ function parseCsvText(text: string, startId: number): Startup[] {
   const iName = idx(['name', 'company', 'startup']);
   const iInd = idx(['industry', 'sector']);
   const iModel = idx(['business_model', 'model', 'b2b']);
-  const iTeam = idx(['team_size', 'team']);
+  const iStage = idx(['stage', 'development_stage']);
+  const iTeam = idx(['team_size', 'team', 'employees']);
+  const iTech = idx(['unique_tech', 'patents', 'unique_technology']);
+  const iCountry = idx(['country', 'country_of_registration']);
   const iFund = idx(['funding_total_usd', 'total_funding', 'funding']);
   const iRounds = idx(['funding_rounds', 'rounds']);
   const iTime = idx(['time_to_first_funding_months', 'months_to_funding', 'time_to_funding']);
   const iExit = idx(['has_previous_exit', 'previous_exit', 'exit']);
+  const iPrevInv = idx(['previous_investment', 'received_investment']);
   const iRev = idx(['sales_amount_usd', 'revenue', 'sales']);
+  const iGrowth = idx(['revenue_growth_pct', 'growth', 'growth_pct']);
+  const iRunway = idx(['runway_months', 'runway']);
+  const iAsk = idx(['ask_amount_usd', 'ask', 'ask_to_itpv']);
+  const iRound = idx(['round_size_usd', 'round_size', 'total_round_size']);
   if (iName < 0) throw new Error('The CSV must include a "name" column — download the template for the expected format.');
   const yes = (v: string) => ['yes', 'true', '1', 'b2b', 'y'].includes(v.trim().toLowerCase());
   const num = (v: string) => Math.max(0, Number(v.replace(/[^0-9.]/g, '')) || 0);
   const cell = (cols: string[], i: number) => (i >= 0 && i < cols.length ? cols[i] : '');
+  const opt = (cols: string[], i: number) => (i >= 0 && cell(cols, i).trim() !== '' ? num(cell(cols, i)) : undefined);
   return lines.slice(1, 201).map((line, n) => {
     const cols = line.split(',');
     return evaluateStartup(
@@ -831,12 +1009,20 @@ function parseCsvText(text: string, startId: number): Startup[] {
         name: cell(cols, iName).trim() || `Imported ${n + 1}`,
         industry: cell(cols, iInd).trim() || 'SaaS',
         is_b2b: iModel >= 0 ? yes(cell(cols, iModel)) : true,
+        stage: iStage >= 0 && cell(cols, iStage).trim() ? cell(cols, iStage).trim() : undefined,
         team_size: Math.max(1, num(cell(cols, iTeam)) || 1),
+        unique_tech: iTech >= 0 ? yes(cell(cols, iTech)) : undefined,
+        country: iCountry >= 0 && cell(cols, iCountry).trim() ? cell(cols, iCountry).trim() : undefined,
         funding_total_usd: num(cell(cols, iFund)),
         funding_rounds: num(cell(cols, iRounds)),
         time_to_first_funding_months: num(cell(cols, iTime)),
         has_previous_exit: yes(cell(cols, iExit)),
+        previous_investment: iPrevInv >= 0 ? yes(cell(cols, iPrevInv)) : undefined,
         sales_amount_usd: num(cell(cols, iRev)),
+        revenue_growth_pct: opt(cols, iGrowth),
+        runway_months: opt(cols, iRunway),
+        ask_amount_usd: opt(cols, iAsk),
+        round_size_usd: opt(cols, iRound),
       },
       startId + n
     );
@@ -845,14 +1031,14 @@ function parseCsvText(text: string, startId: number): Startup[] {
 
 function downloadCsvTemplate() {
   const csv = [
-    'name,industry,business_model,team_size,funding_total_usd,funding_rounds,time_to_first_funding_months,has_previous_exit,sales_amount_usd',
-    'Acme Robotics,SaaS,B2B,8,450000,2,7,no,25000',
+    'name,industry,business_model,stage,team_size,unique_tech,country,funding_total_usd,funding_rounds,time_to_first_funding_months,has_previous_exit,previous_investment,sales_amount_usd,revenue_growth_pct,runway_months,ask_amount_usd,round_size_usd',
+    'Acme Robotics,DeepTech,B2B,MVP,8,yes,Uzbekistan,450000,2,7,no,yes,25000,18,14,300000,800000',
   ].join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'dealflow-application-template.csv';
+  a.download = 'dealflow-itpv-template.csv';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -880,20 +1066,51 @@ function Segmented({ value, options, onChange }: {
   );
 }
 
+const COUNTRIES = ['Uzbekistan', 'Kazakhstan', 'Kyrgyzstan', 'Tajikistan', 'Turkmenistan', 'Azerbaijan', 'Russia', 'United States', 'United Kingdom', 'Other'];
+const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
+
+const emptyForm = {
+  // Step 1 · Project Information
+  name: '', industry: 'AI/ML', custom_industry: '', stage: 'Idea',
+  is_b2b: true, team_size: 5, unique_tech: false, revenue_model: revenueModels[0],
+  founding_year: 2024, country: 'Uzbekistan', description: '',
+  ask_amount_usd: 0, round_size_usd: 0, previous_investment: false,
+  // Step 2 · Contacts & Team
+  founder_name: '', founder_role: 'CEO / Founder', founder_background: '', successful_project: '',
+  technical_cofounder: false,
+  // Step 3 · Materials / financial snapshot
+  funding_total_usd: 0, funding_rounds: 0, time_to_first_funding_months: 0, has_previous_exit: false,
+  sales_amount_usd: 0,
+  revenue_growth_pct: '' as number | '', runway_months: '' as number | '', monthly_burn_usd: '' as number | '',
+  sam_usd: '' as number | '', som_usd: '' as number | '',
+};
+type FormState = typeof emptyForm;
+
+function Field({ label, htmlFor, children, hint }: { label: string; htmlFor?: string; children: React.ReactNode; hint?: string }) {
+  return (
+    <div>
+      <label htmlFor={htmlFor} className="microlabel block mb-1.5">{label}</label>
+      {children}
+      {hint && <p className="text-[10px] text-ink-3 mt-1">{hint}</p>}
+    </div>
+  );
+}
+
 function EvaluateModal({ open, onClose, onCreate, nextId }: {
   open: boolean;
   onClose: () => void;
   onCreate: (created: Startup[]) => void;
   nextId: number;
 }) {
-  const [tab, setTab] = useState<'form' | 'csv'>('form');
+  const [mode, setMode] = useState<'app' | 'csv'>('app');
+  const [step, setStep] = useState(1);
   const [evaluating, setEvaluating] = useState(false);
   const [csvError, setCsvError] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    name: '', founder_name: '', industry: industries[0], is_b2b: true,
-    team_size: 5, funding_total_usd: 0, funding_rounds: 0,
-    time_to_first_funding_months: 0, has_previous_exit: false, sales_amount_usd: 0,
-  });
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [deckName, setDeckName] = useState('');
+  const [finName, setFinName] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [extract, setExtract] = useState<{ matched: { label: string; value: string }[]; source: string; error?: string } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -902,170 +1119,325 @@ function EvaluateModal({ open, onClose, onCreate, nextId }: {
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
+  useEffect(() => {
+    if (open) { setStep(1); setMode('app'); setForm(emptyForm); setDeckName(''); setFinName(''); setExtract(null); setCsvError(null); }
+  }, [open]);
+
   if (!open) return null;
 
   const num = (v: string) => Math.max(0, Math.round(Number(v) || 0));
-  const inputCls =
-    'w-full bg-canvas border border-line rounded-lg px-3 py-2 text-[13px] placeholder:text-ink-3 focus:outline-none focus:border-accent transition-colors';
+  const toOpt = (v: number | ''): number | undefined => (v === '' ? undefined : Math.max(0, Number(v) || 0));
+  const set = (patch: Partial<FormState>) => setForm((f) => ({ ...f, ...patch }));
+  const inputCls = 'w-full bg-canvas border border-line rounded-lg px-3 py-2 text-[13px] placeholder:text-ink-3 focus:outline-none focus:border-accent transition-colors';
+
+  const resolvedIndustry = form.industry === 'Other' ? (form.custom_industry.trim() || 'Other') : form.industry;
+  const preview = buildForecast(resolvedIndustry);
+  const askOk = form.ask_amount_usd === 0 || (form.ask_amount_usd >= 10000 && form.ask_amount_usd <= 1_000_000);
+
+  const runExtract = async (file: File | undefined | null, kind: 'deck' | 'financial') => {
+    if (!file) return;
+    if (kind === 'deck') setDeckName(file.name); else setFinName(file.name);
+    setExtracting(true); setExtract(null);
+    const res = await extractFromFile(file);
+    const x = res.fields;
+    const patch: Partial<FormState> = {};
+    const setIf = <K extends keyof ExtractedFields>(k: K, apply: (v: number) => void) => { if (x[k] != null) apply(x[k] as number); };
+    setIf('sales_amount_usd', (v) => (patch.sales_amount_usd = v));
+    setIf('funding_total_usd', (v) => (patch.funding_total_usd = v));
+    setIf('ask_amount_usd', (v) => (patch.ask_amount_usd = v));
+    setIf('round_size_usd', (v) => (patch.round_size_usd = v));
+    setIf('team_size', (v) => (patch.team_size = v));
+    setIf('revenue_growth_pct', (v) => (patch.revenue_growth_pct = v));
+    setIf('runway_months', (v) => (patch.runway_months = v));
+    setIf('monthly_burn_usd', (v) => (patch.monthly_burn_usd = v));
+    setIf('sam_usd', (v) => (patch.sam_usd = v));
+    setIf('som_usd', (v) => (patch.som_usd = v));
+    setIf('founding_year', (v) => (patch.founding_year = v));
+    setForm((f) => ({ ...f, ...patch }));
+    setExtract({ matched: res.matched, source: res.source, error: res.error });
+    setExtracting(false);
+  };
 
   const submit = () => {
     if (!form.name.trim() || evaluating) return;
     setEvaluating(true);
     setTimeout(() => {
-      const s = evaluateStartup(
-        {
-          ...form,
-          name: form.name.trim(),
-          founder_name: form.founder_name.trim() || undefined,
-          description: `${form.is_b2b ? 'B2B' : 'B2C'} ${form.industry.toLowerCase()} startup — submitted via manual entry`,
-        },
-        nextId
-      );
+      const input: StartupInput = {
+        name: form.name.trim(),
+        industry: resolvedIndustry,
+        is_b2b: form.is_b2b,
+        team_size: Math.max(1, form.team_size),
+        funding_total_usd: form.funding_total_usd,
+        funding_rounds: form.funding_rounds,
+        time_to_first_funding_months: form.time_to_first_funding_months,
+        has_previous_exit: form.has_previous_exit,
+        sales_amount_usd: form.sales_amount_usd,
+        founder_name: form.founder_name.trim() || undefined,
+        founder_role: form.founder_role,
+        founder_background: form.founder_background.trim() || undefined,
+        description: form.description.trim() || undefined,
+        stage: form.stage,
+        unique_tech: form.unique_tech,
+        revenue_model: form.revenue_model,
+        country: form.country,
+        founding_year: form.founding_year,
+        ask_amount_usd: form.ask_amount_usd || undefined,
+        round_size_usd: form.round_size_usd || undefined,
+        previous_investment: form.previous_investment,
+        successful_project: form.successful_project.trim() || undefined,
+        technical_cofounder: form.technical_cofounder,
+        revenue_growth_pct: toOpt(form.revenue_growth_pct),
+        runway_months: toOpt(form.runway_months),
+        monthly_burn_usd: toOpt(form.monthly_burn_usd),
+        sam_usd: toOpt(form.sam_usd),
+        som_usd: toOpt(form.som_usd),
+      };
+      const s = evaluateStartup(input, nextId);
       setEvaluating(false);
       onCreate([s]);
     }, 900);
   };
 
-  const handleFile = (file: File | undefined | null) => {
+  const handleCsv = (file: File | undefined | null) => {
     if (!file) return;
     setCsvError(null);
     const reader = new FileReader();
     reader.onload = () => {
-      try {
-        const created = parseCsvText(String(reader.result || ''), nextId);
-        onCreate(created);
-      } catch (e) {
-        setCsvError(e instanceof Error ? e.message : 'Could not parse that file.');
-      }
+      try { onCreate(parseCsvText(String(reader.result || ''), nextId)); }
+      catch (e) { setCsvError(e instanceof Error ? e.message : 'Could not parse that file.'); }
     };
     reader.readAsText(file);
   };
 
+  const stepLabels = ['Project Information', 'Contacts & Team', 'Materials'];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-ink/40" onClick={onClose} />
-      <div className="relative bg-pane border border-line rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-5 pt-4">
-          <h2 className="text-[15px] font-semibold">New evaluation</h2>
-          <button onClick={onClose} aria-label="Close" className="text-ink-3 hover:text-ink p-1">
-            <X className="w-4 h-4" />
-          </button>
+      <div className="relative bg-pane border border-line rounded-xl w-full max-w-2xl max-h-[92vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 pt-4 shrink-0">
+          <h2 className="text-[15px] font-semibold">Investment application</h2>
+          <button onClick={onClose} aria-label="Close" className="text-ink-3 hover:text-ink p-1"><X className="w-4 h-4" /></button>
         </div>
-        <div className="flex gap-1 px-5 pt-3 border-b border-line">
-          {([['form', 'Single company'], ['csv', 'CSV batch']] as const).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={`px-3 py-2 text-[13px] font-medium border-b-2 -mb-px transition-colors ${
-                tab === key ? 'border-accent text-accent-deep' : 'border-transparent text-ink-3 hover:text-ink'
-              }`}
-            >
+        <div className="flex gap-1 px-5 pt-3 border-b border-line shrink-0">
+          {([['app', 'Application'], ['csv', 'CSV batch']] as const).map(([key, label]) => (
+            <button key={key} onClick={() => setMode(key)}
+              className={`px-3 py-2 text-[13px] font-medium border-b-2 -mb-px transition-colors ${mode === key ? 'border-accent text-accent-deep' : 'border-transparent text-ink-3 hover:text-ink'}`}>
               {label}
             </button>
           ))}
         </div>
 
-        {tab === 'form' ? (
-          <form
-            className="p-5 space-y-4"
-            onSubmit={(e) => { e.preventDefault(); submit(); }}
-          >
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="ev-name" className="microlabel block mb-1.5">Company name *</label>
-                <input id="ev-name" className={inputCls} placeholder="Acme Robotics" value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} autoFocus />
-              </div>
-              <div>
-                <label htmlFor="ev-founder" className="microlabel block mb-1.5">Founder (optional)</label>
-                <input id="ev-founder" className={inputCls} placeholder="Full name" value={form.founder_name}
-                  onChange={(e) => setForm((f) => ({ ...f, founder_name: e.target.value }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-industry" className="microlabel block mb-1.5">Industry</label>
-                <select id="ev-industry" className={inputCls} value={form.industry}
-                  onChange={(e) => setForm((f) => ({ ...f, industry: e.target.value }))}>
-                  {industries.map((ind) => <option key={ind} value={ind}>{ind}</option>)}
-                </select>
-              </div>
-              <div>
-                <span className="microlabel block mb-1.5">Business model</span>
-                <Segmented value={form.is_b2b ? 'b2b' : 'b2c'}
-                  options={[{ key: 'b2b', label: 'B2B' }, { key: 'b2c', label: 'B2C' }]}
-                  onChange={(k) => setForm((f) => ({ ...f, is_b2b: k === 'b2b' }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-team" className="microlabel block mb-1.5">Team size</label>
-                <input id="ev-team" type="number" min={1} className={inputCls} value={form.team_size}
-                  onChange={(e) => setForm((f) => ({ ...f, team_size: Math.max(1, num(e.target.value)) }))} />
-              </div>
-              <div>
-                <span className="microlabel block mb-1.5">Previous founder exit</span>
-                <Segmented value={form.has_previous_exit ? 'yes' : 'no'}
-                  options={[{ key: 'no', label: 'No' }, { key: 'yes', label: 'Yes' }]}
-                  onChange={(k) => setForm((f) => ({ ...f, has_previous_exit: k === 'yes' }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-funding" className="microlabel block mb-1.5">Total funding (USD)</label>
-                <input id="ev-funding" type="number" min={0} step={10000} className={inputCls} value={form.funding_total_usd}
-                  onChange={(e) => setForm((f) => ({ ...f, funding_total_usd: num(e.target.value) }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-rounds" className="microlabel block mb-1.5">Funding rounds</label>
-                <input id="ev-rounds" type="number" min={0} className={inputCls} value={form.funding_rounds}
-                  onChange={(e) => setForm((f) => ({ ...f, funding_rounds: num(e.target.value) }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-time" className="microlabel block mb-1.5">Months to first funding</label>
-                <input id="ev-time" type="number" min={0} className={inputCls} value={form.time_to_first_funding_months}
-                  onChange={(e) => setForm((f) => ({ ...f, time_to_first_funding_months: num(e.target.value) }))} />
-              </div>
-              <div>
-                <label htmlFor="ev-revenue" className="microlabel block mb-1.5">Revenue to date (USD)</label>
-                <input id="ev-revenue" type="number" min={0} step={1000} className={inputCls} value={form.sales_amount_usd}
-                  onChange={(e) => setForm((f) => ({ ...f, sales_amount_usd: num(e.target.value) }))} />
-              </div>
+        {mode === 'app' ? (
+          <>
+            {/* step indicator */}
+            <div className="flex items-center justify-center gap-2 py-4 shrink-0">
+              {stepLabels.map((label, i) => {
+                const n = i + 1;
+                const done = step > n;
+                const active = step === n;
+                return (
+                  <div key={label} className="flex items-center gap-2">
+                    <button onClick={() => setStep(n)} className={`w-6 h-6 rounded-full grid place-items-center text-[11px] font-semibold transition-colors ${done ? 'bg-accent text-white' : active ? 'bg-accent text-white' : 'bg-tint text-ink-3'}`}>
+                      {done ? <Check className="w-3.5 h-3.5" /> : n}
+                    </button>
+                    <span className={`text-[11px] font-medium ${active ? 'text-ink' : 'text-ink-3'} hidden sm:inline`}>{label}</span>
+                    {n < 3 && <span className={`w-6 h-px ${done ? 'bg-accent' : 'bg-line'}`} />}
+                  </div>
+                );
+              })}
             </div>
-            <button
-              type="submit"
-              disabled={!form.name.trim() || evaluating}
-              className="relative w-full overflow-hidden inline-flex items-center justify-center gap-2 rounded-lg bg-accent text-white text-[13px] font-medium py-2.5 hover:bg-accent-deep transition-colors disabled:opacity-60"
-            >
-              {evaluating ? (
-                <>
-                  <span className="absolute inset-y-0 w-1/3 bg-white/20 scanbar" />
-                  Scoring application…
-                </>
-              ) : (
-                'Evaluate'
+
+            <div className="flex-1 overflow-y-auto px-5 pb-2">
+              {step === 1 && (
+                <div className="space-y-4 view-enter">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Startup name *" htmlFor="ev-name">
+                      <input id="ev-name" className={inputCls} placeholder="Acme Robotics" value={form.name} onChange={(e) => set({ name: e.target.value })} autoFocus />
+                    </Field>
+                    <Field label="Industry" htmlFor="ev-industry">
+                      <select id="ev-industry" className={inputCls} value={form.industry} onChange={(e) => set({ industry: e.target.value })}>
+                        {industries.map((ind) => <option key={ind} value={ind}>{ind}</option>)}
+                      </select>
+                    </Field>
+                    {form.industry === 'Other' && (
+                      <Field label="Custom industry" htmlFor="ev-custom">
+                        <input id="ev-custom" className={inputCls} placeholder="AI / Data Science" value={form.custom_industry} onChange={(e) => set({ custom_industry: e.target.value })} />
+                      </Field>
+                    )}
+                    <Field label="Development stage" htmlFor="ev-stage">
+                      <select id="ev-stage" className={inputCls} value={form.stage} onChange={(e) => set({ stage: e.target.value })}>
+                        {stages.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Employees" htmlFor="ev-team">
+                      <input id="ev-team" type="number" min={1} className={inputCls} value={form.team_size} onChange={(e) => set({ team_size: Math.max(1, num(e.target.value)) })} />
+                    </Field>
+                    <Field label="Business model">
+                      <Segmented value={form.is_b2b ? 'b2b' : 'b2c'} options={[{ key: 'b2b', label: 'B2B' }, { key: 'b2c', label: 'B2C' }]} onChange={(k) => set({ is_b2b: k === 'b2b' })} />
+                    </Field>
+                    <Field label="Unique tech / patents?">
+                      <Segmented value={form.unique_tech ? 'yes' : 'no'} options={[{ key: 'no', label: 'No' }, { key: 'yes', label: 'Yes' }]} onChange={(k) => set({ unique_tech: k === 'yes' })} />
+                    </Field>
+                    <Field label="Revenue model" htmlFor="ev-revmodel">
+                      <select id="ev-revmodel" className={inputCls} value={form.revenue_model} onChange={(e) => set({ revenue_model: e.target.value })}>
+                        {revenueModels.map((r) => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Founding year" htmlFor="ev-year">
+                      <select id="ev-year" className={inputCls} value={form.founding_year} onChange={(e) => set({ founding_year: Number(e.target.value) })}>
+                        {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Country of registration" htmlFor="ev-country">
+                      <select id="ev-country" className={inputCls} value={form.country} onChange={(e) => set({ country: e.target.value })}>
+                        {COUNTRIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Ask to ITPV ($)" htmlFor="ev-ask" hint={!askOk ? 'Outside the $10K–$1M fund mandate' : undefined}>
+                      <input id="ev-ask" type="number" min={0} step={10000} className={`${inputCls} ${!askOk ? 'border-warn' : ''}`} placeholder="e.g. 300000" value={form.ask_amount_usd || ''} onChange={(e) => set({ ask_amount_usd: num(e.target.value) })} />
+                    </Field>
+                    <Field label="Total round size ($)" htmlFor="ev-round">
+                      <input id="ev-round" type="number" min={0} step={10000} className={inputCls} placeholder="e.g. 1000000" value={form.round_size_usd || ''} onChange={(e) => set({ round_size_usd: num(e.target.value) })} />
+                    </Field>
+                    <Field label="Previous investment?">
+                      <Segmented value={form.previous_investment ? 'yes' : 'no'} options={[{ key: 'no', label: 'No' }, { key: 'yes', label: 'Yes' }]} onChange={(k) => set({ previous_investment: k === 'yes' })} />
+                    </Field>
+                  </div>
+                  <Field label="Startup description" htmlFor="ev-desc">
+                    <textarea id="ev-desc" rows={2} className={inputCls} placeholder="What the company does, in one or two sentences." value={form.description} onChange={(e) => set({ description: e.target.value })} />
+                  </Field>
+                  <div className="flex items-start gap-2.5 bg-accent-soft/50 border border-accent/15 rounded-lg px-3 py-2.5">
+                    <Sparkles className="w-3.5 h-3.5 text-accent-deep shrink-0 mt-0.5" />
+                    <p className="text-[11px] leading-relaxed text-ink-2">
+                      Market &amp; macro auto-filled from <span className="font-medium text-ink">{resolvedIndustry}</span>: modeled growth <span className="font-mono text-accent-deep">{(preview.cagr * 100).toFixed(1)}% CAGR</span>, SAM ${preview.sam_now}M, plus regulatory &amp; FDI context. You can refine numbers in step 3.
+                    </p>
+                  </div>
+                </div>
               )}
-            </button>
-            <p className="text-[11px] text-ink-3 text-center">
-              Scored instantly with the same decision-tree rules as the demo cohort.
-            </p>
-          </form>
+
+              {step === 2 && (
+                <div className="space-y-4 view-enter">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Founder name" htmlFor="ev-founder">
+                      <input id="ev-founder" className={inputCls} placeholder="Full name" value={form.founder_name} onChange={(e) => set({ founder_name: e.target.value })} />
+                    </Field>
+                    <Field label="Role" htmlFor="ev-role">
+                      <input id="ev-role" className={inputCls} placeholder="CEO / Founder" value={form.founder_role} onChange={(e) => set({ founder_role: e.target.value })} />
+                    </Field>
+                    <Field label="Technical co-founder?">
+                      <Segmented value={form.technical_cofounder ? 'yes' : 'no'} options={[{ key: 'no', label: 'No' }, { key: 'yes', label: 'Yes' }]} onChange={(k) => set({ technical_cofounder: k === 'yes' })} />
+                    </Field>
+                    <Field label="Previous founder exit?">
+                      <Segmented value={form.has_previous_exit ? 'yes' : 'no'} options={[{ key: 'no', label: 'No' }, { key: 'yes', label: 'Yes' }]} onChange={(k) => set({ has_previous_exit: k === 'yes' })} />
+                    </Field>
+                  </div>
+                  <Field label="Founder background" htmlFor="ev-bg" hint="Domain experience, prior roles — the more detail, the higher the data confidence.">
+                    <textarea id="ev-bg" rows={3} className={inputCls} placeholder="Aspiring / experienced founder with background in…" value={form.founder_background} onChange={(e) => set({ founder_background: e.target.value })} />
+                  </Field>
+                  <Field label="Notable / successful projects (optional)" htmlFor="ev-proj">
+                    <textarea id="ev-proj" rows={2} className={inputCls} placeholder="Products shipped, prior ventures, exits…" value={form.successful_project} onChange={(e) => set({ successful_project: e.target.value })} />
+                  </Field>
+                </div>
+              )}
+
+              {step === 3 && (
+                <div className="space-y-4 view-enter">
+                  <div>
+                    <div className="microlabel mb-2">Upload materials — read in your browser, nothing leaves the page</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <FileDrop label="Pitch deck" accept=".pdf" fileName={deckName} icon={<FileText className="w-4 h-4" />} hint="PDF" onFile={(f) => runExtract(f, 'deck')} />
+                      <FileDrop label="Financial model" accept=".xlsx,.xls,.csv,.pdf" fileName={finName} icon={<FileText className="w-4 h-4" />} hint="XLSX, CSV, PDF" onFile={(f) => runExtract(f, 'financial')} />
+                    </div>
+                    {extracting && <p className="text-xs text-ink-2 mt-2 inline-flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Reading document…</p>}
+                    {extract && !extracting && (
+                      extract.error ? (
+                        <p className="text-xs text-bad mt-2">{extract.error}</p>
+                      ) : extract.matched.length > 0 ? (
+                        <div className="mt-2 bg-good-soft/60 border border-good/20 rounded-lg px-3 py-2.5">
+                          <p className="text-[11px] font-medium text-good mb-1.5 inline-flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Extracted &amp; pre-filled — confirm below</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {extract.matched.map((m, i) => (
+                              <span key={i} className="text-[11px] bg-pane border border-line rounded px-1.5 py-0.5 text-ink-2"><span className="text-ink-3">{m.label}:</span> {m.value}</span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-ink-3 mt-2">Read the file, but couldn&apos;t auto-detect figures — enter them below.</p>
+                      )
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="microlabel mb-2">Financial snapshot <span className="text-ink-3 normal-case tracking-normal">(optional — sharpens the score &amp; confidence)</span></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      <Field label="Revenue ($)" htmlFor="ev-rev">
+                        <input id="ev-rev" type="number" min={0} step={1000} className={inputCls} value={form.sales_amount_usd || ''} placeholder="0" onChange={(e) => set({ sales_amount_usd: num(e.target.value) })} />
+                      </Field>
+                      <Field label="Growth (%/mo)" htmlFor="ev-growth">
+                        <input id="ev-growth" type="number" min={0} className={inputCls} value={form.revenue_growth_pct} placeholder="—" onChange={(e) => set({ revenue_growth_pct: e.target.value === '' ? '' : num(e.target.value) })} />
+                      </Field>
+                      <Field label="Runway (mo)" htmlFor="ev-runway">
+                        <input id="ev-runway" type="number" min={0} className={inputCls} value={form.runway_months} placeholder="—" onChange={(e) => set({ runway_months: e.target.value === '' ? '' : num(e.target.value) })} />
+                      </Field>
+                      <Field label="Monthly burn ($)" htmlFor="ev-burn">
+                        <input id="ev-burn" type="number" min={0} step={1000} className={inputCls} value={form.monthly_burn_usd} placeholder="—" onChange={(e) => set({ monthly_burn_usd: e.target.value === '' ? '' : num(e.target.value) })} />
+                      </Field>
+                      <Field label="SAM ($M)" htmlFor="ev-sam" hint="Blank = sector default">
+                        <input id="ev-sam" type="number" min={0} className={inputCls} value={form.sam_usd} placeholder={String(preview.sam_now)} onChange={(e) => set({ sam_usd: e.target.value === '' ? '' : num(e.target.value) })} />
+                      </Field>
+                      <Field label="SOM ($M)" htmlFor="ev-som" hint="Blank = sector default">
+                        <input id="ev-som" type="number" min={0} className={inputCls} value={form.som_usd} placeholder={String(preview.som_now)} onChange={(e) => set({ som_usd: e.target.value === '' ? '' : num(e.target.value) })} />
+                      </Field>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <Field label="Total funding ($)" htmlFor="ev-fund">
+                      <input id="ev-fund" type="number" min={0} step={10000} className={inputCls} value={form.funding_total_usd || ''} placeholder="0" onChange={(e) => set({ funding_total_usd: num(e.target.value) })} />
+                    </Field>
+                    <Field label="Funding rounds" htmlFor="ev-rounds">
+                      <input id="ev-rounds" type="number" min={0} className={inputCls} value={form.funding_rounds || ''} placeholder="0" onChange={(e) => set({ funding_rounds: num(e.target.value) })} />
+                    </Field>
+                    <Field label="Months to funding" htmlFor="ev-time">
+                      <input id="ev-time" type="number" min={0} className={inputCls} value={form.time_to_first_funding_months || ''} placeholder="0" onChange={(e) => set({ time_to_first_funding_months: num(e.target.value) })} />
+                    </Field>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* footer nav */}
+            <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-line shrink-0">
+              <button onClick={() => (step > 1 ? setStep(step - 1) : onClose())}
+                className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-2 bg-pane border border-line rounded-lg px-3.5 py-2 hover:bg-tint transition-colors">
+                <ArrowLeft className="w-3.5 h-3.5" /> {step > 1 ? 'Back' : 'Cancel'}
+              </button>
+              {step < 3 ? (
+                <button onClick={() => setStep(step + 1)} disabled={step === 1 && !form.name.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-accent text-white text-[13px] font-medium px-4 py-2 hover:bg-accent-deep transition-colors disabled:opacity-60">
+                  Next <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <button onClick={submit} disabled={!form.name.trim() || evaluating}
+                  className="relative overflow-hidden inline-flex items-center justify-center gap-2 rounded-lg bg-accent text-white text-[13px] font-medium px-5 py-2 hover:bg-accent-deep transition-colors disabled:opacity-60 min-w-[150px]">
+                  {evaluating ? (<><span className="absolute inset-y-0 w-1/3 bg-white/20 scanbar" /> Scoring…</>) : (<>Evaluate application <ArrowRight className="w-3.5 h-3.5" /></>)}
+                </button>
+              )}
+            </div>
+          </>
         ) : (
           <div className="p-5 space-y-4">
             <label className="block border border-dashed border-ink-3 rounded-xl px-4 py-8 text-center cursor-pointer hover:border-accent hover:bg-accent-soft/40 transition-colors">
-              <input
-                type="file"
-                accept=".csv,text/csv"
-                className="hidden"
-                onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ''; }}
-              />
+              <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { handleCsv(e.target.files?.[0]); e.target.value = ''; }} />
               <Upload className="w-5 h-5 text-ink-3 mx-auto mb-2" />
               <span className="block text-[13px] font-medium text-ink">Upload a CSV of applications</span>
               <span className="block text-xs text-ink-3 mt-1">Click to browse — every row is scored on import</span>
             </label>
             {csvError && <p className="text-xs text-bad">{csvError}</p>}
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] text-ink-3">
-                Columns: name, industry, business_model, team_size, funding, rounds, months to funding, previous exit, revenue.
-              </p>
-              <button
-                onClick={downloadCsvTemplate}
-                className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-deep"
-              >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] text-ink-3">Columns: name, industry, stage, team, unique_tech, country, funding, rounds, previous exit/investment, revenue, growth, runway, ask, round size.</p>
+              <button onClick={downloadCsvTemplate} className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-deep">
                 <FileDown className="w-3.5 h-3.5" /> Template
               </button>
             </div>
@@ -1073,6 +1445,18 @@ function EvaluateModal({ open, onClose, onCreate, nextId }: {
         )}
       </div>
     </div>
+  );
+}
+
+function FileDrop({ label, accept, fileName, hint, icon, onFile }: {
+  label: string; accept: string; fileName: string; hint: string; icon: React.ReactNode; onFile: (f: File | undefined | null) => void;
+}) {
+  return (
+    <label className={`block border border-dashed rounded-lg px-3 py-4 text-center cursor-pointer transition-colors ${fileName ? 'border-accent/50 bg-accent-soft/30' : 'border-line hover:border-accent hover:bg-tint/40'}`}>
+      <input type="file" accept={accept} className="hidden" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ''; }} />
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink">{icon} {label}</span>
+      <span className="block text-[11px] mt-1 truncate text-ink-3">{fileName || `Click to upload · ${hint}`}</span>
+    </label>
   );
 }
 
@@ -1141,6 +1525,15 @@ export default function Home() {
           </div>
         </div>
 
+        <div className="p-2.5 pb-0">
+          <button
+            onClick={() => setModalOpen(true)}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-accent text-white text-[13px] font-medium py-2.5 hover:bg-accent-deep transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" /> New evaluation
+          </button>
+        </div>
+
         <nav className="flex-1 p-2.5 space-y-0.5 overflow-y-auto">
           {nav.map((n) => (
             <button
@@ -1172,12 +1565,6 @@ export default function Home() {
         </nav>
 
         <div className="p-3 border-t border-line space-y-2">
-          <button
-            onClick={() => setModalOpen(true)}
-            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-accent text-white text-[13px] font-medium py-2.5 hover:bg-accent-deep transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" /> New evaluation
-          </button>
           <button
             onClick={runScreen}
             disabled={screening}
