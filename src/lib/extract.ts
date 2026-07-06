@@ -27,7 +27,8 @@ export interface ExtractResult {
 
 // "$1.2M" | "500k" | "1,200,000" | "usd 300 000" -> number of dollars
 function money(raw: string): number | null {
-  const cleaned = raw.replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  // strip thousands separators (commas and spaces between digit groups) before parsing
+  const cleaned = raw.replace(/,/g, '').replace(/(\d)\s+(?=\d{3}\b)/g, '$1').trim();
   const m = cleaned.match(/\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(k|m|b|thousand|million|billion)?/i);
   if (!m) return null;
   let v = parseFloat(m[1]);
@@ -102,7 +103,7 @@ export function fieldsFromText(text: string): { fields: ExtractedFields; matched
   const burn = firstMoney(t, ['burn', 'monthly burn', 'burn rate']);
   put('monthly_burn_usd', burn ?? undefined, 'Monthly burn', burn ? `$${burn.toLocaleString()}` : '');
 
-  const team = firstInt(t, ['team of', 'team size', 'employees', 'headcount', 'full-time', 'fte'], 5000);
+  const team = firstInt(t, ['team of', 'team size', 'team', 'employees', 'headcount', 'full-time', 'fte', 'people', 'staff'], 5000);
   put('team_size', team ?? undefined, 'Team size', team ? String(team) : '');
 
   const growth = firstPct(t, ['growth', 'growing', 'mom', 'month-over-month', 'yoy', 'month over month']);
