@@ -6,47 +6,45 @@ import { Toaster } from "@/components/ui/toaster";
 const instrumentSans = Instrument_Sans({
   variable: "--font-instrument",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const plexMono = IBM_Plex_Mono({
   variable: "--font-plex-mono",
   subsets: ["latin"],
   weight: ["400", "500", "600"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "DealFlow AI — Transparent Startup Screening",
+  title: "DealFlow — Investment Intelligence for Venture Capital",
   description:
-    "AI-powered deal screening for venture funds. Evaluate 1,000+ startup applications in seconds — every score fully explained, every decision auditable.",
+    "Screen hundreds of startups in seconds and surface the few most likely to become exceptional investments. Every score fully explained, every decision auditable.",
   keywords: [
     "venture capital",
     "deal flow",
     "startup screening",
+    "investment intelligence",
     "explainable AI",
-    "decision tree",
-    "IT-Park Ventures",
+    "portfolio construction",
   ],
-  icons: {
-    icon: "/favicon.svg",
-  },
+  icons: { icon: "/favicon.svg" },
   openGraph: {
-    title: "DealFlow AI — Transparent Startup Screening",
+    title: "DealFlow — Investment Intelligence for Venture Capital",
     description:
-      "Evaluate 1,000+ startup applications in seconds. Every decision fully explainable.",
-    siteName: "DealFlow AI",
+      "Screen hundreds of startups in seconds and surface the few most likely to become exceptional investments.",
+    siteName: "DealFlow",
     type: "website",
   },
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${instrumentSans.variable} ${plexMono.variable} antialiased bg-background text-foreground`}
+        className={`${instrumentSans.variable} ${plexMono.variable} antialiased bg-canvas text-ink`}
       >
         {children}
         <Toaster />

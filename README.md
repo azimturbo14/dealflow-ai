@@ -1,46 +1,71 @@
-# DealFlow AI
+# DealFlow
 
-**Transparent AI-Powered Startup Screening for Venture Funds**
+**Investment intelligence for venture capital.**
 
-Evaluate 1,000+ startup applications in seconds — not hours. Every decision is fully explainable.
+Screen hundreds of startups in a single pass and surface the few most likely to
+become exceptional investments — with a transparent rationale behind every score.
 
-## How It Works
+## The experience
 
-DealFlow AI uses a **Decision Tree Classifier** trained on real startup outcome data (Crunchbase/Kaggle) to screen startups across 6 key criteria:
+DealFlow is intentionally sequenced. Nothing is scored until an analyst chooses a
+source of data:
 
-| Criterion | What It Measures |
-|---|---|
-| Previous Exit | Has a founder had a successful exit before? |
-| Total Funding | How much capital has been raised? |
-| Funding Rounds | How many funding rounds completed? |
-| Time to First Funding | How quickly did they get funded? |
-| Business Model | B2B vs B2C? |
-| Team Size | How large is the founding team? |
+```
+Landing → Choose a data source → Upload CSV/Excel or use the demo cohort
+        → AI processing → Portfolio overview → Ranked companies → Company memo
+```
 
-## Transparency First
+There is no auto-loaded demo dashboard. The analyst decides what to screen.
 
-Every startup evaluation shows:
-- **Score** (0-100%) with clear color coding
-- **Strengths** — what the model found positive
-- **Red Flags** — what the model flagged as risky
-- **Decision Tree Path** — the exact logic chain the model followed
-- **Risk Analysis** — detailed written risk assessment
+### Landing
+A premium, institutional landing page that communicates quality, speed and
+confidence — with a live product preview, a clear "how it works", key
+capabilities, and the reasons investors can trust the output.
 
-## Tech Stack
+### Portfolio overview
+Answers one question first — *what deserves my attention?* — through a deliberate
+hierarchy: global metrics, then AI insights, then the highest-potential companies,
+then the full ranked dataset.
 
-- **Frontend**: Next.js 16, React, TypeScript, Tailwind CSS 4, shadcn/ui
-- **ML Engine**: scikit-learn Decision Tree Classifier (85%+ accuracy on training data)
-- **Data**: 50 realistic Central Asian startup profiles for demo
+### Company memo
+Every company opens as an investment memo: thesis, overall score, why the model
+ranked it that way, founder assessment, market opportunity, traction, financial
+signals, competitive position, strengths, risks, supporting evidence, similar
+companies, and recommended next steps.
 
-## Demo
+## Scoring
 
-Click **"Load Demo Data"** on the home screen to evaluate 50 simulated startups instantly.
+Each company is scored across four weighted pillars — **Team & Founder (25)**,
+**Traction & Financials (30)**, **Market & Growth (30)** and **Macro & Deal Fit
+(15)**. Market growth is not self-reported: a log-linear OLS regression on each
+sector's historical TAM sets the ceiling every company is measured against, with a
+95% confidence band and a fit quality (R²). A data-confidence rating reflects how
+complete each submission was.
 
-## Deployment
+## Data in, ranking out
+
+Import a CSV or Excel export (one row per company), enter a single company through
+a guided form, or drop in a pitch deck / financial model — PDFs are parsed with
+pdf.js and spreadsheets with SheetJS, entirely in the browser. Nothing is uploaded
+to a server.
+
+## Design system
+
+A single token system (`src/app/globals.css`) drives typography, spacing, color,
+elevation, radii and motion across a light workspace and a dark marketing surface.
+Shared primitives live in `src/components/app/primitives.tsx`; screens are composed
+from them so the whole product reads as one system.
+
+## Tech
+
+- **Framework**: Next.js 16, React 19, TypeScript
+- **Styling**: Tailwind CSS 4 (CSS-variable tokens), shadcn/ui primitives
+- **Charts**: hand-built SVG (score rings, sparklines, market regression)
+- **Parsing**: pdf.js, SheetJS — browser-side, no backend
+
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
-
-Built for a partnership pitch with [IT-Park Ventures](https://itparkventures.uz) — Uzbekistan's $10M VC fund and accelerator.
