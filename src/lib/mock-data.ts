@@ -1,4 +1,5 @@
 import { resolveMarket, type MarketContext, type Band } from './markets';
+import { assessThesisFit, MENA_CLIENT_THESIS, type ThesisFit } from './thesis';
 
 export interface MarketResearch {
   tam: string;
@@ -87,8 +88,9 @@ export interface Startup {
   round_size_usd: number;
   previous_investment: boolean;
   // scoring output
-  score: number;
-  verdict: "high" | "moderate" | "low";
+  score: number;             // 0–100 company quality (thesis-independent)
+  verdict: "high" | "moderate" | "low"; // pursue / review / pass — quality AND thesis fit
+  thesis_fit: ThesisFit;     // how the deal matches this fund's mandate
   confidence: number; // 0–100, how much of the scoring data was actually provided
   strengths: string[];
   red_flags: string[];
@@ -490,7 +492,18 @@ export function evaluateStartup(input: StartupInput, id: number, jitter = 0): St
   ];
   const raw = teamScore + tracScore + mktScore + macroScore;
   const score = clamp(Math.round(raw + jitter), 5, 99);
-  const verdict: "high" | "moderate" | "low" = score >= 70 ? "high" : score >= 45 ? "moderate" : "low";
+  // Quality verdict from the score alone …
+  const qualityVerdict: "high" | "moderate" | "low" = score >= 70 ? "high" : score >= 45 ? "moderate" : "low";
+
+  // … then thesis fit decides whether a good company is one this fund actually pursues.
+  const thesis_fit = assessThesisFit({
+    is_b2b, dev_stage: stage, unique_tech,
+    technical_cofounder: input.technical_cofounder,
+    sector_key: key, industry, description: input.description,
+  }, MENA_CLIENT_THESIS);
+  let verdict: "high" | "moderate" | "low" = qualityVerdict;
+  if (thesis_fit.gate === 'hard-pass') verdict = 'low';                       // off-mandate → pass regardless of quality
+  else if (thesis_fit.gate === 'cap-review' && verdict === 'high') verdict = 'moderate'; // strong but off-thesis → review, not pursue
 
   // Confidence = how much of the deck/financial data was actually provided
   const snapshot = [
@@ -526,6 +539,8 @@ export function evaluateStartup(input: StartupInput, id: number, jitter = 0): St
   if (runway != null && runway < 6) red_flags.push(`Only ${runway} months runway — near-term funding pressure`);
   if (cc.fx_risk === 'High' || cc.inflation >= 20) red_flags.push(`Macro/FX risk in ${cc.name} — ${cc.inflation}% inflation, ${cc.fx_note}`);
   if (cc.capital_availability === 'Low') red_flags.push(`Thin local capital in ${cc.name} — next round likely raised out-of-market`);
+  if (thesis_fit.gate === 'hard-pass') red_flags.push(`Off current thesis: ${thesis_fit.reasons[0]}`);
+  else if (thesis_fit.gate === 'cap-review') red_flags.push(`Thesis caveat: ${thesis_fit.reasons[0]}`);
   if (red_flags.length === 0) red_flags.push('No critical red flags detected at this stage');
 
   // Decision path (audit log) — pillar driven
@@ -535,7 +550,13 @@ export function evaluateStartup(input: StartupInput, id: number, jitter = 0): St
   decision_path.push(`Strongest pillar → ${ranked[0].label} (${ranked[0].score}/${ranked[0].max})`);
   decision_path.push(`Weakest pillar → ${ranked[ranked.length - 1].label} (${ranked[ranked.length - 1].score}/${ranked[ranked.length - 1].max})`);
   decision_path.push(`Data confidence → ${confidence}%`);
-  decision_path.push(`→ ${verdict === 'high' ? 'PURSUE' : verdict === 'moderate' ? 'REVIEW' : 'PASS'} (${score}%)`);
+  const gateNote = thesis_fit.gate === 'hard-pass'
+    ? ` — capped to PASS (off-thesis, quality would be ${qualityVerdict === 'high' ? 'PURSUE' : qualityVerdict === 'moderate' ? 'REVIEW' : 'PASS'})`
+    : thesis_fit.gate === 'cap-review' && qualityVerdict === 'high'
+      ? ' — capped to REVIEW (strong company, off current thesis)'
+      : '';
+  decision_path.push(`Thesis fit → ${thesis_fit.band} (${thesis_fit.score}/100)`);
+  decision_path.push(`→ ${verdict === 'high' ? 'PURSUE' : verdict === 'moderate' ? 'REVIEW' : 'PASS'} (${score}%)${gateNote}`);
 
   // Risks
   const risks: string[] = [];
@@ -574,6 +595,7 @@ export function evaluateStartup(input: StartupInput, id: number, jitter = 0): St
     previous_investment,
     score,
     verdict,
+    thesis_fit,
     confidence,
     strengths,
     red_flags,
